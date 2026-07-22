@@ -4,7 +4,7 @@ import asyncio
 from aiogram import Bot, Dispatcher
 
 from handlers.start import router as start_router
-from handlers.callbackquery import router as callback_query
+from handlers.callbacks import router as callback_query
 
 
 
