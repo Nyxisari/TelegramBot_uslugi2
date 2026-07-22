@@ -1,6 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from keyboards.cancel import cancel
+from keyboards.cancel import cancel_faq
 
 router = Router()
 
@@ -11,6 +11,6 @@ async def faq(callback: CallbackQuery):
              "1. Как сделать заказ?\n"
              "2. Как оплатить услугу?\n"
              "3. Как связаться с поддержкой?",
-        reply_markup=cancel
+        reply_markup=cancel_faq
     )
     await callback.answer()
