@@ -1,0 +1,2 @@
+pydantic-settings~=2.14.2
+aiogram~=3.30.0
