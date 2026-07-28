@@ -1,7 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from keyboards.cancel import cancel_photoshoot
-
+from keyboards.months import months_names
 router = Router()
 
 text_msg=("*Условия фотосессии*\n\n"
@@ -16,6 +15,6 @@ text_msg=("*Условия фотосессии*\n\n"
 async def photoshoot(callback: CallbackQuery):
     await callback.message.answer(
         text=text_msg,
-        reply_markup=cancel_photoshoot, parse_mode='Markdown'
+        reply_markup=months_names(), parse_mode='Markdown'
     )
     await callback.answer()
