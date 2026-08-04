@@ -1,17 +1,21 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from handlers.start import router as start
-from handlers.callback.event import router as event
-from handlers.callback.photoshoot import router as photoshoot
+
+from app.handlers.start import start as start_handler
+from app.handlers.callback.event import event as event_handler
+from app.handlers.callback.order import order as order_handler
 
 router = Router()
 
-@router.callback_query(F.data == 'cancel_faq')
-async def faq(callback: CallbackQuery):
-    router.include_router(start)
-@router.callback_query(F.data == 'cancel_event')
-async def event(callback: CallbackQuery):
-        router.include_router(event)
-@router.callback_query(F.data == 'cancel_photoshoot')
-async def photoshoot(callback: CallbackQuery):
-    router.include_router(photoshoot)
+
+@router.callback_query(F.data.startswith("cancel:"))
+async def cancel(callback: CallbackQuery):
+    _, type_cancel = callback.data.split(':')
+
+    if type_cancel == "start":
+        await start_handler(callback.message)
+        await callback.answer()
+    elif type_cancel == "order":
+        await order_handler(callback)
+    else:
+        await callback.answer()

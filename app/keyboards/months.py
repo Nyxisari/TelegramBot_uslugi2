@@ -16,6 +16,7 @@ def months_names():
     works = spreadsheet.worksheets()
     keyboard_date = [InlineKeyboardButton(text=x.title, callback_data=x.title) for x in works]
     keyboard_rows = [keyboard_date[x:x+4] for x in range( 0, len(keyboard_date), 4)]
+    keyboard_rows.append([InlineKeyboardButton(text="Отмена", callback_data="cancel:order")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows, resize_keyboard=True)
     return keyboard
 

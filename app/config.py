@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     ACCOUNT_SETTINGS: str
     GOOGLE_SHEET: str
+    YOOKASSA_TOKEN: str
+    PRICE: int
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
