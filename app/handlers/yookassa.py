@@ -1,12 +1,12 @@
 import os, json
 from aiogram import Router, Dispatcher
-from aiogram.client import bot
-from aiogram.types import Message, LabeledPrice
+from aiogram import F
+from aiogram.types import Message, LabeledPrice, PreCheckoutQuery
 from config import settings
 
-dp = Dispatcher()
+router = Router()
 
-@dp.message(lambda msg: msg.text == 'Оплатить')
+@router.message(lambda msg: msg.text == 'Оплатить')
 async def send_invoice_handler(message: Message):
     provider_data = {
         "receipt": {
@@ -21,11 +21,26 @@ async def send_invoice_handler(message: Message):
             }]
         }
     }
-    await bot.SendInvoice(chat_id=message.chat.id,
+    await message.bot.send_invoice(chat_id=message.chat.id,
                            title="Фотосессия",
-                           discription= "Бронирование фотосессии",
+                           description= "Бронирование фотосессии",
                            payload=f'ps_{message.chat.id}',
                            provider_token=settings.YOOKASSA_TOKEN,
                            currency="RUB",
-                           price=[LabeledPrice(label='Стоимость', amount=settings.PRICE)],
+                           prices=[LabeledPrice(label='Стоимость', amount=settings.PRICE)],
                            provider_data=json.dumps(provider_data))
+
+@router.pre_checkout_query()
+async def checkout_handler(query: PreCheckoutQuery):
+    if query.invoice_payload != f'ps_{query.from_user.id}':
+        await query.answer(ok=False, error_message="Что то пошло не так.")
+    else:
+        await query.answer(ok=True)
+
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message):
+    payment_data = message.successful_payment
+    print(payment_data)
+    payment_id = payment_data.telegram_payment_charge_id
+    print(payment_id)
+    await message.answer(f"Оплата прошла успешно! id: {payment_id}")

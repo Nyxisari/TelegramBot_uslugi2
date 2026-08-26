@@ -7,7 +7,7 @@ router = Router()
 @router.callback_query(F.data == 'order')
 async def order(callback: CallbackQuery):
     await callback.message.answer(
-        text='Выбирите что вам нужно',
+        text='Выберите вид съёмки.',
         reply_markup=keyboard_options
     )
     await callback.answer()
