@@ -14,6 +14,6 @@ text_msg=("*Условия фотосессии*\n\n"
 async def photoshoot(callback: CallbackQuery):
     await callback.message.answer(
         text=text_msg,
-        reply_markup=months_names(), parse_mode='Markdown'
+        reply_markup=await months_names(), parse_mode='Markdown'
     )
     await callback.answer()

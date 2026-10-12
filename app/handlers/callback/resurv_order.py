@@ -2,11 +2,11 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 
-from app.handlers.callback.Google_sheet.gsheet import get_free_times, order_time
-from app.keyboards.times import times_keyboard
-from app.keyboards.confirm import confirm_keyboard
+from handlers.callback.Google_sheet.gsheet import get_free_times
+from keyboards.times import times_keyboard
+from keyboards.confirm import confirm_keyboard
 
-from app.handlers.yookassa import send_invoice_handler
+from handlers.yookassa import start_payment
 
 router = Router()
 
@@ -119,7 +119,9 @@ async def show_order_confirmation(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("confirm:"))
 async def confirm_order(callback: CallbackQuery, state: FSMContext):
-    """Пользователь подтвердил -> бронируем все выбранные часы в таблице одним запросом."""
+    """Пользователь подтвердил -> временно резервируем выбранные часы в таблице
+    ('резервировано @username') и сразу выставляем счёт ЮKassa. Если за 5 минут оплаты нет -
+    бронь снимается и время снова свободно (см. handlers/yookassa.py)."""
     _, month_name, day = callback.data.split(":")
 
     username = callback.from_user.username
@@ -137,23 +139,16 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Выбор времени потерялся, начните заново.", show_alert=True)
         return
 
-    booked, unavailable = await order_time(month_name, day, selected, username)
+    # сбрасываем выбор сразу: повторное нажатие "Подтвердить" не создаст вторую бронь
     await state.update_data(selected=[])
-
-    if booked:
-        await send_invoice_handler(callback.message)
-    else:
-        await callback.message.edit_text(
-            "⚠️ Не удалось записаться — похоже, это время только что заняли. "
-            "Попробуйте выбрать другое время."
-        )
-
-    if unavailable:
-        await callback.message.answer(
-            f"⚠️ Часть времени уже была занята и не забронирована: {', '.join(unavailable)}"
-        )
-
     await callback.answer()
+
+    error = await start_payment(callback.bot, callback.from_user, callback.message.chat.id,
+                                month_name, day, selected)
+    if error:
+        await callback.message.edit_text(f"⚠️ {error}")
+    else:
+        await callback.message.edit_text("✅ Время зарезервировано на 5 минут. Оплатите счёт ниже.")
 
 
 @router.callback_query(F.data == "cancel_reserv_order")

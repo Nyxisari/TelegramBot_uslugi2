@@ -1,223 +1,247 @@
+import asyncio
+
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
 from config import settings
 
-Account_settings=settings.ACCOUNT_SETTINGS
+Account_settings = settings.ACCOUNT_SETTINGS
 id_sheet = settings.GOOGLE_SHEET
 
-scope = ['https://www.googleapis.com/auth/spreadsheets','https://www.googleapis.com/auth/drive']
+scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 
-MONTHS_DAYS = {"Январь": 31,"Февраль": 28,"Март": 31,"Апрель": 30,"Май": 31,"Июнь": 30,"Июль": 31,"Август": 31,"Сентябрь": 30,"Октябрь": 31,"Ноябрь": 30,"Декабрь": 31}
-
-
-async def add_month(month_name):
-    months = MONTHS_DAYS
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(Account_settings, scope)
-    gc = gspread.authorize(credentials)
-    spreadsheet = gc.open_by_key(id_sheet)
-    spreadsheet.add_worksheet(title=month_name, rows=months[month_name] + 1, cols=6)
-    worksheet = spreadsheet.worksheet(month_name)
-    worksheet.update([["15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]], 'A1:F1')
-
+MONTHS_DAYS = {"Январь": 31, "Февраль": 28, "Март": 31, "Апрель": 30, "Май": 31, "Июнь": 30,
+               "Июль": 31, "Август": 31, "Сентябрь": 30, "Октябрь": 31, "Ноябрь": 30, "Декабрь": 31}
 
 COLUMNS = ['A', 'B', 'C', 'D', 'E', 'F']
 
+# Семантика ячеек в таблице:
+#   ''                          - слот недоступен
+#   '1'                         - слот свободен, можно записаться
+#   'резервировано @username'   - слот временно удержан на время оплаты
+#   '@username'                 - слот оплачен и занят пользователем
+RESERVED_PREFIX = "резервировано"
 
-async def get_free_times(month_name, day):
-    """
-    Возвращает список слотов, доступных для записи в конкретный день.
-    Каждый элемент - кортеж (index, label):
-      index - индекс столбца, 0..5 (нужен для order_time)
-      label - подпись времени из шапки листа, например '16:00'
+# Один процесс бота - один замок: чтение-изменение-запись строки не пересекаются
+# между разными пользователями (иначе два человека могут занять один слот).
+_lock = asyncio.Lock()
 
-    Слот считается доступным, если в ячейке стоит ровно '1'
-    (см. семантику ячеек в order_time / get_free_days).
-    """
+
+def reserved_text(display_name: str) -> str:
+    return f"{RESERVED_PREFIX} {display_name}"
+
+
+# ---------------------------------------------------------------- sync-часть
+
+def _spreadsheet():
     credentials = ServiceAccountCredentials.from_json_keyfile_name(Account_settings, scope)
     gc = gspread.authorize(credentials)
-    spreadsheet = gc.open_by_key(id_sheet)
-    worksheet = spreadsheet.worksheet(month_name)
+    return gc.open_by_key(id_sheet)
 
-    day = int(day)
-    row_num = day + 1
-    header = worksheet.row_values(1)
-    row = worksheet.row_values(row_num)
+
+def _pad(row: list[str]) -> list[str]:
+    row = list(row[:6])
     row += [''] * (6 - len(row))
-
-    free_times = []
-    for i, cell in enumerate(row[:6]):
-        if cell.strip() == '1':
-            label = header[i] if i < len(header) else COLUMNS[i]
-            free_times.append((i, label))
-    print(free_times)
-    return free_times
+    return row
 
 
-async def set_available_slots(month_name, day, time):
-    """
-    Проставляет '1' (слот доступен для записи) в выбранные ячейки дня.
-    Предназначена для тебя/админа - чтобы вручную открывать слоты для записи.
+def _label(header: list[str], i: int) -> str:
+    return header[i] if i < len(header) and header[i] else COLUMNS[i]
 
-    month_name - название листа (месяца)
-    day        - номер дня месяца (int)
-    time       - список индексов слотов, которые нужно сделать доступными,
-                 int, 0..5 (0 = столбец A/15:00, ..., 5 = F/20:00)
-                 пример: [0, 1, 2] -> откроет 15:00, 16:00, 17:00
 
-    Семантика ячеек в таблице:
-      ''            - слот недоступен, бронировать нельзя
-      '1'           - слот доступен, можно забронировать
-      '@username'   - слот уже занят этим пользователем
+def _free_days_from_values(all_values: list[list[str]], month_name: str) -> list[int]:
+    # Строка 1 - шапка, день N лежит в строке N+1 (индекс N в all_values).
+    # gspread обрезает хвостовые пустые строки - отсутствующая строка = нет свободных слотов.
+    free_days = []
+    for day in range(1, MONTHS_DAYS[month_name] + 1):
+        if day >= len(all_values):
+            break
+        if any(cell.strip() == '1' for cell in _pad(all_values[day])):
+            free_days.append(day)
+    return free_days
 
-    Ячейки, где уже есть чья-то бронь ('@username'), НЕ перезаписываются -
-    чтобы случайно не стереть существующую запись клиента. Такие слоты
-    попадут в already_booked. Ячейки, уже равные '1', остаются '1' и тоже
-    считаются успешно обработанными.
 
-    Возвращает кортеж (opened, already_booked):
-      opened          - список времени, которые стали/остались доступны ('1')
-      already_booked  - список времени, где уже стояла чья-то бронь -
-                        их пришлось пропустить
-    """
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(Account_settings, scope)
-    gc = gspread.authorize(credentials)
-    spreadsheet = gc.open_by_key(id_sheet)
-    worksheet = spreadsheet.worksheet(month_name)
+def _add_month(month_name):
+    spreadsheet = _spreadsheet()
+    worksheet = spreadsheet.add_worksheet(title=month_name, rows=MONTHS_DAYS[month_name] + 1, cols=6)
+    worksheet.update([["15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]], 'A1:F1')
 
-    day = int(day)  # на случай, если day пришёл строкой
-    row_num = day + 1
-    header = worksheet.row_values(1)  # ["15:00", "16:00", ...] - для читаемых названий в ответе
-    current_row = worksheet.row_values(row_num)
-    current_row += [''] * (6 - len(current_row))
 
+def _get_free_months():
+    result = []
+    for worksheet in _spreadsheet().worksheets():
+        if worksheet.title not in MONTHS_DAYS:
+            continue
+        if _free_days_from_values(worksheet.get_all_values(), worksheet.title):
+            result.append(worksheet.title)
+    return result
+
+
+def _get_free_days(month_name):
+    worksheet = _spreadsheet().worksheet(month_name)
+    return _free_days_from_values(worksheet.get_all_values(), month_name)
+
+
+def _get_free_times(month_name, day):
+    worksheet = _spreadsheet().worksheet(month_name)
+    header = worksheet.row_values(1)
+    row = _pad(worksheet.row_values(int(day) + 1))
+    return [(i, _label(header, i)) for i, cell in enumerate(row) if cell.strip() == '1']
+
+
+def _set_available_slots(month_name, day, time):
+    worksheet = _spreadsheet().worksheet(month_name)
+    row_num = int(day) + 1
+    header = worksheet.row_values(1)
+    current_row = _pad(worksheet.row_values(row_num))
     new_row = current_row.copy()
     opened, already_booked = [], []
 
     for i in time:
         i = int(i)
         if i < 0 or i > 5:
-            continue  # индекс вне диапазона столбцов A..F - игнорируем
-
-        time_label = header[i] if i < len(header) else COLUMNS[i]
+            continue
         cell_value = current_row[i].strip()
-
-        if cell_value == '' or cell_value == '1':
+        if cell_value in ('', '1'):
             new_row[i] = '1'
-            opened.append(time_label)
+            opened.append(_label(header, i))
         else:
-            # там уже что-то не '' и не '1' - считаем это чужой бронью, не трогаем
-            already_booked.append(time_label)
+            already_booked.append(_label(header, i))
 
     if opened:
         worksheet.update([new_row], f'A{row_num}:F{row_num}')
-
     return opened, already_booked
 
 
-async def order_time(month_name, day, time, username):
-    """
-    Бронирует выбранные пользователем слоты времени на конкретный день.
-    Обновление отправляется одним запросом на всю строку (A{row}:F{row}),
-    а не отдельными вызовами на каждую ячейку.
+def _reserve_slots(month_name, day, indices, display_name):
+    worksheet = _spreadsheet().worksheet(month_name)
+    row_num = int(day) + 1
+    header = worksheet.row_values(1)
+    current_row = _pad(worksheet.row_values(row_num))
 
-    month_name - название листа (месяца)
-    day        - номер дня месяца (int)
-    time       - список индексов выбранных слотов, int, 0..5
-                 (0 = столбец A/15:00, 1 = B/16:00, ..., 5 = F/20:00)
-                 пример: [1, 3] -> выбраны 16:00 и 18:00
-    username   - имя пользователя телеграм, которое будет записано в ячейку
-                 (с '@' или без - '@' будет добавлен автоматически)
-
-    Семантика ячеек в таблице:
-      ''            - слот недоступен, бронировать нельзя
-      '1'           - слот доступен, можно забронировать
-      '@username'   - слот уже занят этим пользователем
-
-    Бронируются только те выбранные слоты, которые на данный момент
-    реально доступны (значение в таблице == '1'). Ячейки, не входящие
-    в выбор пользователя, остаются без изменений - для этого текущая
-    строка сначала читается, в ней меняются только нужные позиции,
-    и затем вся строка целиком записывается обратно одним запросом.
-
-    Возвращает кортеж (booked, unavailable):
-      booked      - список времени (заголовков колонок из строки 1),
-                    которые удалось забронировать
-      unavailable - список времени, которые выбрал пользователь,
-                    но забронировать не вышло (уже заняты/недоступны)
-    """
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(Account_settings, scope)
-    gc = gspread.authorize(credentials)
-    spreadsheet = gc.open_by_key(id_sheet)
-    worksheet = spreadsheet.worksheet(month_name)
-
-    day = int(day)  # на случай, если day пришёл строкой из callback_data
-    row_num = day + 1
-    header = worksheet.row_values(1)  # ["15:00", "16:00", ...] - для читаемых названий в ответе
-    current_row = worksheet.row_values(row_num)
-    current_row += [''] * (6 - len(current_row))
+    indices = [int(i) for i in indices if 0 <= int(i) <= 5]
+    unavailable = [_label(header, i) for i in indices if current_row[i].strip() != '1']
+    if unavailable or not indices:
+        return [], unavailable  # бронь всё-или-ничего: если хоть один час занят, ничего не пишем
 
     new_row = current_row.copy()
-    display_name = username if str(username).startswith('@') else f'@{username}'
+    for i in indices:
+        new_row[i] = reserved_text(display_name)
+    worksheet.update([new_row], f'A{row_num}:F{row_num}')
+    return [_label(header, i) for i in indices], []
 
-    booked, unavailable = [], []
 
-    for i in time:
+def _release_slots(month_name, day, indices, display_name):
+    """Возвращает '1' только в тех ячейках, где стоит именно бронь этого пользователя."""
+    worksheet = _spreadsheet().worksheet(month_name)
+    row_num = int(day) + 1
+    current_row = _pad(worksheet.row_values(row_num))
+    new_row = current_row.copy()
+    expected = reserved_text(display_name)
+    changed = False
+
+    for i in indices:
         i = int(i)
-        if i < 0 or i > 5:
-            continue  # индекс вне диапазона столбцов A..F - игнорируем
-
-        time_label = header[i] if i < len(header) else COLUMNS[i]
-
-        if current_row[i].strip() == '1':
-            new_row[i] = display_name
-            booked.append(time_label)
-        else:
-            unavailable.append(time_label)
-
-    if booked:
+        if 0 <= i <= 5 and current_row[i].strip() == expected:
+            new_row[i] = '1'
+            changed = True
+    if changed:
         worksheet.update([new_row], f'A{row_num}:F{row_num}')
+    return changed
 
-    return booked, unavailable
+
+def _finalize_booking(month_name, day, indices, display_name):
+    """После оплаты: 'резервировано @user' -> '@user'.
+    Если бронь успела сняться по таймеру (слот снова '1') - занимаем его.
+    Если слот уже занят кем-то другим - возвращаем False."""
+    worksheet = _spreadsheet().worksheet(month_name)
+    row_num = int(day) + 1
+    current_row = _pad(worksheet.row_values(row_num))
+    new_row = current_row.copy()
+    expected = reserved_text(display_name)
+    ok = True
+
+    for i in indices:
+        i = int(i)
+        if not 0 <= i <= 5:
+            continue
+        value = current_row[i].strip()
+        if value in (expected, '1', display_name):
+            new_row[i] = display_name
+        else:
+            ok = False
+    if new_row != current_row:
+        worksheet.update([new_row], f'A{row_num}:F{row_num}')
+    return ok
 
 
-async def get_free_days(month_name):
-    """
-    Возвращает список дней месяца (int), в которых есть хотя бы один
-    слот, доступный для записи.
+def _release_all_reserved():
+    """Старт бота: в памяти броней нет, значит все 'резервировано ...' - зависшие."""
+    released = 0
+    for worksheet in _spreadsheet().worksheets():
+        if worksheet.title not in MONTHS_DAYS:
+            continue
+        values = worksheet.get_all_values()
+        updates = []
+        for idx, raw in enumerate(values):
+            if idx == 0:
+                continue
+            row = _pad(raw)
+            new_row = ['1' if c.strip().startswith(RESERVED_PREFIX) else c for c in row]
+            if new_row != row:
+                released += sum(1 for a, b in zip(row, new_row) if a != b)
+                updates.append({'range': f'A{idx + 1}:F{idx + 1}', 'values': [new_row]})
+        if updates:
+            worksheet.batch_update(updates)
+    return released
 
-    Семантика ячеек в таблице:
-      ''            - слот недоступен, записаться нельзя
-      '1'           - слот доступен, можно записаться
-      '@username'   - слот уже занят этим пользователем
 
-    Строка 1 листа - заголовок с временем, поэтому день N лежит в строке N+1
-    (это соответствует тому, как order_time пишет данные: A{day+1}:F{day+1}).
+# --------------------------------------------------------------- async-обёртки
 
-    ВАЖНО: worksheet.get_all_values() обрезает хвостовые полностью пустые
-    строки листа - если для дня в конце месяца ещё ни одна ячейка не
-    заполнена, gspread такую строку вообще не вернёт. Раньше при такой
-    "пустой по умолчанию" строке день считался свободным, но при новой
-    семантике пустая ячейка = "нельзя записаться", поэтому отсутствующая
-    строка тоже означает, что свободных слотов в этот день нет.
-    """
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(Account_settings, scope)
-    gc = gspread.authorize(credentials)
-    spreadsheet = gc.open_by_key(id_sheet)
-    worksheet = spreadsheet.worksheet(month_name)
+async def _run(func, *args):
+    async with _lock:
+        return await asyncio.to_thread(func, *args)
 
-    all_values = worksheet.get_all_values()
-    days_in_month = MONTHS_DAYS[month_name]
-    free_days = []
 
-    for day in range(1, days_in_month + 1):
-        row_idx = day  # строка day+1 в таблице, но индекс в all_values (0-based) как раз == day
-        if row_idx >= len(all_values):
-            continue  # строки нет вообще - значит доступных слотов в этот день нет
+async def add_month(month_name):
+    return await _run(_add_month, month_name)
 
-        row = all_values[row_idx][:6]
-        row += [''] * (6 - len(row))  # добиваем до 6 ячеек, если строка короче
 
-        if any(cell.strip() == '1' for cell in row):
-            free_days.append(day)
+async def get_free_months() -> list[str]:
+    """Названия месяцев (листов), где есть хотя бы один свободный слот."""
+    return await _run(_get_free_months)
 
-    return free_days
+
+async def get_free_days(month_name) -> list[int]:
+    return await _run(_get_free_days, month_name)
+
+
+async def get_free_times(month_name, day) -> list[tuple[int, str]]:
+    """[(index 0..5, '16:00'), ...] - только слоты со значением '1'."""
+    return await _run(_get_free_times, month_name, day)
+
+
+async def set_available_slots(month_name, day, time):
+    """Для админа: открыть слоты ('1'). Чужие брони не перезаписываются.
+    Возвращает (opened, already_booked)."""
+    return await _run(_set_available_slots, month_name, day, time)
+
+
+async def reserve_slots(month_name, day, indices, display_name):
+    """Временно удерживает слоты ('резервировано @user').
+    Возвращает (reserved_labels, unavailable_labels); при непустом unavailable ничего не записано."""
+    return await _run(_reserve_slots, month_name, day, indices, display_name)
+
+
+async def release_slots(month_name, day, indices, display_name):
+    """Снимает бронь пользователя, слоты снова '1'."""
+    return await _run(_release_slots, month_name, day, indices, display_name)
+
+
+async def finalize_booking(month_name, day, indices, display_name) -> bool:
+    """Оплата прошла: записывает '@user' в ячейки."""
+    return await _run(_finalize_booking, month_name, day, indices, display_name)
+
+
+async def release_all_reserved() -> int:
+    return await _run(_release_all_reserved)

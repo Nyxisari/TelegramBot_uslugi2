@@ -1,6 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from app.keyboards.months import months_names
+from keyboards.months import months_names
 
 router = Router()
 
@@ -15,6 +15,6 @@ text_msg=("*Условия съёмки мероприятий*\n\n"
 async def event(callback: CallbackQuery):
     await callback.message.answer(
         text=text_msg,
-        reply_markup=months_names(), parse_mode='Markdown'
+        reply_markup=await months_names(), parse_mode='Markdown'
     )
     await callback.answer()

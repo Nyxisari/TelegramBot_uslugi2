@@ -1,9 +1,9 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
-from app.handlers.start import start as start_handler
-from app.handlers.callback.event import event as event_handler
-from app.handlers.callback.order import order as order_handler
+from handlers.start import start as start_handler
+from handlers.callback.event import event as event_handler
+from handlers.callback.order import order as order_handler
 
 router = Router()
 
